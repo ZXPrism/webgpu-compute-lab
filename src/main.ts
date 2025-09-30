@@ -16,6 +16,7 @@ let g_prefix_sum_cum_kernel: Kernel;
 
 let c_reduce_kernel_segment_length = 256;
 let g_reduce_kernel_chain: Kernel[] = [];
+let g_reduce_kernel_dispatch_params: number[] = [];
 let g_reduce_native_kernel: Kernel;
 
 let g_array_length_buffer: GPUBuffer;
@@ -93,6 +94,7 @@ function init_kernels() {
     for (let i = 1; i <= c_array_length; i <<= 8) {
         const prev_output_length = curr_output_length;
         curr_output_length = Math.ceil(curr_output_length / c_reduce_kernel_segment_length);
+        g_reduce_kernel_dispatch_params.push(curr_output_length);
 
         const reduce_kernel_builder = new KernelBuilder(g_device, "reduce", reduce_shader, "compute");
 
@@ -137,9 +139,9 @@ async function compute() {
 
     // g_prefix_sum_native_kernel.dispatch(1, 1, 1, command_encoder, query.descriptor);
     if (true) {
-        for (const reduce_kernel of g_reduce_kernel_chain) {
-            reduce_kernel.dispatch(Math.ceil(c_array_length / c_reduce_kernel_segment_length), 1, 1, command_encoder, query.descriptor);
-        }
+        g_reduce_kernel_chain.forEach((reduce_kernel, index) => {
+            reduce_kernel.dispatch(g_reduce_kernel_dispatch_params[index], 1, 1, command_encoder, query.descriptor);
+        });
     } else {
         g_reduce_native_kernel.dispatch(1, 1, 1, command_encoder, query.descriptor);
     }
