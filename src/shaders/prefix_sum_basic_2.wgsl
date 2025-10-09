@@ -31,25 +31,20 @@ override SEGMENT_LENGTH: u32;
 @group(0) @binding(0) var<uniform> array_length : u32;
 @group(0) @binding(1) var<storage, read> input_array : array<u32>;
 @group(0) @binding(2) var<storage, read_write> prefix_sum_intermediate : array<u32>;
-@group(0) @binding(3) var<storage, read_write> block_sum : array<u32>;
-
-var<workgroup> workgroup_data: array<u32, 256>;
+@group(0) @binding(3) var<storage, read_write> segment_sum : array<u32>;
 
 @compute
-@workgroup_size(256, 1, 1)
+@workgroup_size(1, 1, 1)
 fn compute(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) segment_id : vec3<u32>
 ) {
-    // copy current segment to shared memory
-    if global_id.x < array_length {
-        workgroup_data[local_id.x] = input_array[global_id.x];
-    } else {
-        workgroup_data[local_id.x] = 0u;
+    let base_addr = segment_id.x * SEGMENT_LENGTH;
+    prefix_sum_intermediate[base_addr] = input_array[base_addr];
+    for(var i = 1u; i < SEGMENT_LENGTH; i++) {
+        let curr_addr = base_addr + i;
+        prefix_sum_intermediate[curr_addr] = prefix_sum_intermediate[curr_addr - 1u] + input_array[curr_addr];
     }
-
-    workgroupBarrier();
-
-    ;
+    segment_sum[segment_id.x] = prefix_sum_intermediate[base_addr + SEGMENT_LENGTH - 1u];
 }
