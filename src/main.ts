@@ -5,12 +5,13 @@ import { KernelBuilder } from "./kernel_builder";
 import reduce_shader from "./shaders/reduce_basic.wgsl?raw";
 import reduce_native_shader from "./shaders/reduce_native.wgsl?raw";
 import reduce_upsweep_shader from "./shaders/reduce_upsweep.wgsl?raw";
+import reduce_flatten_shader from "./shaders/reduce_flatten.wgsl?raw";
 
 import prefix_sum_native_shader from "./shaders/prefix_sum_native.wgsl?raw";
 
 let c_array_length = 1000000;
 let c_reduce_mode = 2; // 0: native; 1: simple; 2: upsweep; 3: upsweep + no bank conflict
-let c_prefix_sum_mode = 0; // 0: native
+let c_prefix_sum_mode = 1; // 0: native
 
 let g_device: GPUDevice;
 
@@ -200,7 +201,7 @@ function init_kernels() {
 }
 
 async function compute() {
-    console.warn("starting computing..");
+    console.warn("start computing..");
 
     const command_encoder = g_device.createCommandEncoder();
 
