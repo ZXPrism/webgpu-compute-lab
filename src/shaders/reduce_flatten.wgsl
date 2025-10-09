@@ -1,5 +1,3 @@
-// a slightly modified version of reduce_basic.wgsl
-
 override SEGMENT_LENGTH: u32;
 
 var<workgroup> workgroup_data: array<u32, SEGMENT_LENGTH>;
