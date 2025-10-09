@@ -19,6 +19,8 @@ fn compute(
     // Each invocation will populate the shared workgroup data from the input data
     if global_id.x < array_length { // NOTE: we can't simply return here, or it will cause inconsistency for the barrier at L23
         workgroup_data[local_id.x] = input_array[global_id.x];
+    } else{
+        workgroup_data[local_id.x] = 0; // init out-of-bounds data to ZERO
     }
     // Wait for each invocation to populate their region of local data
     workgroupBarrier();
@@ -34,9 +36,9 @@ fn compute(
             // Read current values from workgroup_data
             sum = workgroup_data[local_id.x * 2] + workgroup_data[local_id.x * 2 + 1];
         }
-
         // Wait until all invocations have finished reading from workgroup_data, and have calculated their respective sums
         workgroupBarrier();
+
         if local_id.x < current_size {
             workgroup_data[local_id.x] = sum;
         }
