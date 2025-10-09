@@ -26,8 +26,8 @@ let g_prefix_sum_basic_kernel: Kernel;
 let g_prefix_sum_cum_kernel: Kernel;
 
 let g_reduce_native_kernel: Kernel;
-let g_reduce_kernel_chain: Kernel[] = [];
-let g_reduce_kernel_dispatch_params: number[] = [];
+let g_reduce_basic_kernel_chain: Kernel[] = [];
+let g_reduce_basic_kernel_dispatch_params: number[] = [];
 
 let g_reduce_upsweep_kernel_chain: Kernel[] = [];
 let g_reduce_upsweep_kernel_dispatch_params: number[] = [];
@@ -114,14 +114,20 @@ function init_kernels_reduce() {
     // this is not optimal, should balance the segment size in each pass, as well as adding batching for each workgroup
     // but for simplicity I will stick to the former stretegy now
 
-    // reduce basic
-    {
+    if (c_reduce_mode == 0) {// reduce native
+        const reduce_native_kernel_builder = new KernelBuilder(g_device, "reduce_native", reduce_native_shader, "compute");
+        g_reduce_native_kernel = reduce_native_kernel_builder
+            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+            .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+            .create_then_add_buffer("output_sum", 2, BufferTypeEnum.STORAGE, 4)
+            .build();
+    } else if (c_reduce_mode == 1) { // reduce basic
         let curr_output_length = c_array_length;
         for (let i = 1; i <= c_array_length; i <<= 8) {
             const prev_output_length = curr_output_length;
             curr_output_length = Math.ceil(curr_output_length / c_reduce_kernel_segment_length);
 
-            g_reduce_kernel_dispatch_params.push(curr_output_length);
+            g_reduce_basic_kernel_dispatch_params.push(curr_output_length);
 
             const reduce_kernel_builder = new KernelBuilder(g_device, "reduce", reduce_shader, "compute");
 
@@ -134,7 +140,7 @@ function init_kernels_reduce() {
                     .create_then_add_buffer("output_sum_per_segment", 2, BufferTypeEnum.STORAGE, curr_output_length * 4)
                     .build();
             } else {
-                const prev_kernel = g_reduce_kernel_chain[g_reduce_kernel_chain.length - 1];
+                const prev_kernel = g_reduce_basic_kernel_chain[g_reduce_basic_kernel_chain.length - 1];
                 reduce_kernel = reduce_kernel_builder
                     .add_constant("SEGMENT_LENGTH", c_reduce_kernel_segment_length)
                     .create_then_add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, 4)
@@ -147,21 +153,10 @@ function init_kernels_reduce() {
                 g_device.queue.writeBuffer(reduce_kernel.get_buffer("array_length"), 0, prev_output_length_buffer.buffer);
             }
 
-            g_reduce_kernel_chain.push(reduce_kernel);
+            g_reduce_basic_kernel_chain.push(reduce_kernel);
         }
-        console.log(`reduce basic kernel will use ${g_reduce_kernel_chain.length} pass(es)`)
-    }
-
-    // reduce native
-    const reduce_native_kernel_builder = new KernelBuilder(g_device, "reduce_native", reduce_native_shader, "compute");
-    g_reduce_native_kernel = reduce_native_kernel_builder
-        .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
-        .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
-        .create_then_add_buffer("output_sum", 2, BufferTypeEnum.STORAGE, 4)
-        .build();
-
-    // reduce upsweep
-    {
+        console.log(`reduce basic kernel will use ${g_reduce_basic_kernel_chain.length} pass(es)`)
+    } else if (c_reduce_mode == 2) { // reduce upsweep
         let curr_output_length = c_array_length;
         for (let i = 1; i <= c_array_length; i <<= 8) {
             const prev_output_length = curr_output_length;
@@ -195,11 +190,9 @@ function init_kernels_reduce() {
 
             g_reduce_upsweep_kernel_chain.push(reduce_kernel);
         }
-        console.log(`reduce upsweep kernel will use ${g_reduce_upsweep_kernel_chain.length} pass(es)`)
-    }
 
-    // reduce flatten
-    {
+        console.log(`reduce upsweep kernel will use ${g_reduce_upsweep_kernel_chain.length} pass(es)`);
+    } else if (c_reduce_mode == 3) { // reduce flatten
         let curr_output_length = c_array_length;
         for (let i = 1; i <= c_array_length; i <<= 8) {
             const prev_output_length = curr_output_length;
@@ -233,6 +226,7 @@ function init_kernels_reduce() {
 
             g_reduce_flatten_kernel_chain.push(reduce_kernel);
         }
+
         console.log(`reduce flatten kernel will use ${g_reduce_flatten_kernel_chain.length} pass(es)`)
     }
 }
@@ -274,62 +268,62 @@ async function compute() {
 
     const command_encoder = g_device.createCommandEncoder();
 
-    function compute_reduce(mode: number) {
-        if (mode == 0) {
+    function compute_reduce() {
+        if (c_reduce_mode == 0) {
             g_reduce_native_kernel.dispatch(1, 1, 1, command_encoder);
-        } else if (mode == 1) {
-            g_reduce_kernel_chain.forEach((reduce_kernel, index) => {
-                reduce_kernel.dispatch(g_reduce_kernel_dispatch_params[index], 1, 1, command_encoder);
+        } else if (c_reduce_mode == 1) {
+            g_reduce_basic_kernel_chain.forEach((reduce_kernel, index) => {
+                reduce_kernel.dispatch(g_reduce_basic_kernel_dispatch_params[index], 1, 1, command_encoder);
             });
-        } else if (mode == 2) {
+        } else if (c_reduce_mode == 2) {
             g_reduce_upsweep_kernel_chain.forEach((reduce_kernel, index) => {
                 reduce_kernel.dispatch(g_reduce_upsweep_kernel_dispatch_params[index], 1, 1, command_encoder);
             });
-        } else {
+        } else if (c_reduce_mode == 3) {
             g_reduce_flatten_kernel_chain.forEach((reduce_kernel, index) => {
                 reduce_kernel.dispatch(g_reduce_flatten_kernel_dispatch_params[index], 1, 1, command_encoder);
             });
         }
     }
 
-    function compute_prefix_sum(mode: number) {
-        if (mode == 0) {
+    function compute_prefix_sum() {
+        if (c_prefix_sum_mode == 0) {
             g_prefix_sum_native_kernel.dispatch(1, 1, 1, command_encoder);
-        } else if (mode == 1) {
+        } else if (c_prefix_sum_mode == 1) {
             const segment_cnt = Math.ceil(c_array_length / c_prefix_sum_kernel_segment_length);
             g_prefix_sum_basic_kernel.dispatch(segment_cnt, 1, 1, command_encoder);
             g_prefix_sum_cum_kernel.dispatch(segment_cnt, 1, 1, command_encoder);
         }
     }
 
-    compute_reduce(c_reduce_mode);
-    compute_prefix_sum(c_prefix_sum_mode);
+    compute_reduce();
+    compute_prefix_sum();
 
     g_device.queue.submit([command_encoder.finish()]);
 }
 
-async function inspect_output_reduce(mode: number) {
+async function inspect_output_reduce() {
     console.log("reference reduce result: ", g_input_array_sum);
-    if (mode == 0) {
+    if (c_reduce_mode == 0) {
         console.log("reduce native --->");
         await g_reduce_native_kernel.print_buffer_uint32("output_sum");
-    } else if (mode == 1) {
+    } else if (c_reduce_mode == 1) {
         console.log("reduce basic --->");
-        await g_reduce_kernel_chain[g_reduce_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
-    } else if (mode == 2) {
+        await g_reduce_basic_kernel_chain[g_reduce_basic_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
+    } else if (c_reduce_mode == 2) {
         console.log("reduce upsweep --->");
-        await g_reduce_upsweep_kernel_chain[g_reduce_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
-    } else {
+        await g_reduce_upsweep_kernel_chain[g_reduce_upsweep_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
+    } else if (c_reduce_mode == 3) {
         console.log("reduce flatten --->");
-        await g_reduce_flatten_kernel_chain[g_reduce_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
+        await g_reduce_flatten_kernel_chain[g_reduce_flatten_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
     }
 }
 
-async function inspect_output_prefix_sum(mode: number) {
-    if (mode == 0) {
+async function inspect_output_prefix_sum() {
+    if (c_prefix_sum_mode == 0) {
         console.log("prefix sum native --->");
         await g_prefix_sum_native_kernel.print_buffer_uint32("prefix_sum");
-    } else if (mode == 1) {
+    } else if (c_prefix_sum_mode == 1) {
         console.log("prefix sum basic --->");
         await g_prefix_sum_cum_kernel.print_buffer_uint32("prefix_sum");
         await g_prefix_sum_cum_kernel.print_buffer_uint32("segment_sum");
@@ -337,8 +331,8 @@ async function inspect_output_prefix_sum(mode: number) {
 }
 
 async function inspect_output() {
-    await inspect_output_reduce(c_reduce_mode);
-    await inspect_output_prefix_sum(c_prefix_sum_mode);
+    await inspect_output_reduce();
+    await inspect_output_prefix_sum();
 }
 
 async function main() {
