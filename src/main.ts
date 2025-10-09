@@ -8,6 +8,8 @@ import reduce_shader from "./shaders/reduce.wgsl?raw";
 import reduce_native_shader from "./shaders/reduce_native.wgsl?raw";
 
 let c_array_length = 1000000;
+let c_reduce_mode = 1; // 0: native; 1: simple; 2: upsweep; 3: upsweep + no bank conflict
+let c_prefix_sum_mode = 0; // 0: native
 
 let g_device: GPUDevice;
 
@@ -78,14 +80,7 @@ function init_input_array() {
     console.info("[input array]: ", input_array_buffer);
 }
 
-function init_kernels() {
-    const prefix_sum_native_kernel_builder = new KernelBuilder(g_device, "prefix_sum_native", prefix_sum_native_shader, "compute");
-    g_prefix_sum_native_kernel = prefix_sum_native_kernel_builder
-        .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
-        .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
-        .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
-        .build();
-
+function init_kernels_reduce() {
     // to reduce an input array with arbitrary size, we need multiple passes
     // current stretegy is to divide input array into segments, every segment is of equal size (256 elements), each workgroup process one segment
     // this is not optimal, should balance the segment size in each pass, as well as adding batching for each workgroup
@@ -132,42 +127,78 @@ function init_kernels() {
         .build();
 }
 
-async function compute() {
-    const query = create_timestamp_query(g_device);
+function init_kernels_prefix_sum() {
+    const prefix_sum_native_kernel_builder = new KernelBuilder(g_device, "prefix_sum_native", prefix_sum_native_shader, "compute");
+    g_prefix_sum_native_kernel = prefix_sum_native_kernel_builder
+        .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+        .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+        .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
+        .build();
+}
 
+function init_kernels() {
+    init_kernels_prefix_sum();
+    init_kernels_reduce();
+}
+
+async function compute() {
     const command_encoder = g_device.createCommandEncoder();
 
-    // g_prefix_sum_native_kernel.dispatch(1, 1, 1, command_encoder, query.descriptor);
-    if (true) {
-        g_reduce_kernel_chain.forEach((reduce_kernel, index) => {
-            reduce_kernel.dispatch(g_reduce_kernel_dispatch_params[index], 1, 1, command_encoder, query.descriptor);
-        });
-    } else {
-        g_reduce_native_kernel.dispatch(1, 1, 1, command_encoder, query.descriptor);
+    function compute_reduce(mode: number) {
+        if (mode == 0) {
+            g_reduce_native_kernel.dispatch(1, 1, 1, command_encoder);
+        } else if (mode == 1) {
+            g_reduce_kernel_chain.forEach((reduce_kernel, index) => {
+                reduce_kernel.dispatch(g_reduce_kernel_dispatch_params[index], 1, 1, command_encoder);
+            });
+        } else if (mode == 2) {
+
+        } else {
+
+        }
     }
-    query.resolve(command_encoder);
+
+    function compute_prefix_sum(mode: number) {
+        if (mode == 0) {
+            g_prefix_sum_native_kernel.dispatch(1, 1, 1, command_encoder);
+        }
+    }
+
+    compute_reduce(c_reduce_mode);
+    compute_prefix_sum(c_prefix_sum_mode);
 
     g_device.queue.submit([command_encoder.finish()]);
+}
 
-    const timestamps = await query.get_timestamps();
-    console.info("gpu time: ", Number(timestamps[1] - timestamps[0]) / 1e6, "ms");
+function inspect_output_reduce(mode: number) {
+    console.log("reference reduce result: ", g_input_array_sum);
+    if (mode == 0) {
+        g_reduce_native_kernel.print_buffer_uint32("output_sum");
+    } else if (mode == 1) {
+        g_reduce_kernel_chain[g_reduce_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
+    } else if (mode == 2) {
+
+    } else {
+
+    }
+}
+
+function inspect_output_prefix_sum(mode: number) {
+    if (mode == 0) {
+        g_prefix_sum_native_kernel.print_buffer_uint32("prefix_sum");
+    }
 }
 
 function inspect_output() {
-    // g_prefix_sum_native_kernel.print_buffer_uint32("prefix_sum");
-    console.log("reference reduce result: ", g_input_array_sum);
-    if (true) {
-        g_reduce_kernel_chain[g_reduce_kernel_chain.length - 1].print_buffer_uint32("output_sum_per_segment");
-    } else {
-        g_reduce_native_kernel.print_buffer_uint32("output_sum");
-    }
+    inspect_output_reduce(c_reduce_mode);
+    inspect_output_prefix_sum(c_prefix_sum_mode);
 }
 
 async function main() {
     await init_webgpu();
     init_input_array();
     init_kernels();
-    await compute();
+    compute();
     inspect_output();
 }
 

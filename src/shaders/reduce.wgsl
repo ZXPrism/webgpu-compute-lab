@@ -17,7 +17,7 @@ fn compute(
     @builtin(workgroup_id) segment_id : vec3<u32>
 ) {
     // Each invocation will populate the shared workgroup data from the input data
-    if global_id.x < array_length { // NOTE: we can't simply return here, or it will cause inconsitency for the barrier at L23
+    if global_id.x < array_length { // NOTE: we can't simply return here, or it will cause inconsistency for the barrier at L23
         workgroup_data[local_id.x] = input_array[global_id.x];
     }
     // Wait for each invocation to populate their region of local data
