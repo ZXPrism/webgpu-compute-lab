@@ -107,26 +107,26 @@ export class KernelBuilder {
         }
 
         this.bind_group_layout = this.device.createBindGroupLayout({
-            label: `${this.kernel_name}BindGroupLayout`,
+            label: `${this.kernel_name}_BindGroupLayout`,
             entries: bind_group_layout_entry_list
         });
     }
 
     private _init_pipeline_layout(): void {
         this.pipeline_layout = this.device.createPipelineLayout({
-            label: `${this.kernel_name}PipelineLayout`,
+            label: `${this.kernel_name}_PipelineLayout`,
             bindGroupLayouts: [this.bind_group_layout]
         });
     }
 
     private _init_pipeline(kernel: Kernel): void {
         const shader_module = this.device.createShaderModule({
-            label: `${this.kernel_name}ShaderModule`,
+            label: `${this.kernel_name}_ShaderModule`,
             code: this.shader_source,
         });
 
         kernel.pipeline = this.device.createComputePipeline({
-            label: `${this.kernel_name}Pipeline`,
+            label: `${this.kernel_name}_Pipeline`,
             layout: this.pipeline_layout!,
             compute: {
                 module: shader_module,

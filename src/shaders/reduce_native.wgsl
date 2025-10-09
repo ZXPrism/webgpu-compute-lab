@@ -5,6 +5,10 @@
 @compute
 @workgroup_size(1, 1, 1)
 fn compute(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
+    // TODO: consider impl a ver, which copies the whole segment into shared memory
+    // then do native reduce
+    // will it has better perf?
+
     let n = array_length;
     var sum = 0u;
     for(var i = 0u; i < n; i++) {
