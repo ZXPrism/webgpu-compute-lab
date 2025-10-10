@@ -1,31 +1,3 @@
-// pre_hs = copy.copy(arr) + [0] * N
-// front = 0
-// back = 1
-// for d in range(1, log2n + 1):
-//     prev_step = 2 ** (d - 1)
-//     for k in range(N):  # in parallel
-//         if k < prev_step:
-//             pre_hs[back * N + k] = pre_hs[front * N + k]
-//         else:
-//             pre_hs[back * N + k] = (
-//                 pre_hs[front * N + k] + pre_hs[front * N + k - prev_step]
-//             )
-//     front, back = back, front
-// print(
-//     f"prefix sum (Hillis & Steele, double-buffered, concatenated): {pre_hs[:N] if front == 0 else pre_hs[N:]}"
-// )
-
-// implementation notes:
-// 1. two pass approach (applicable for any prefix sum algorithms)
-// 2. divide input array input segments, one workgroup -> one segment
-// 3. pass 1: perform prefix sum kernel
-// 3.1 load segment data into the shared memory of current workgroup (remember to allocate double space for double buffering)
-// 3.2 add workgroup barrier to ensure all data is loaded for current workgroup (note: sync between workgroups are not required
-// Q: how it works in for-loops?
-// 3.3 for each layer, add workgroup barrier to ensure every thread within one workgroup is working on the same layer
-// 3.4 perform additions for current layer (one thread one element; Q: one thread one segment??)
-// 4. pass 2: add sum of previous segment to each element of the current segment
-
 override SEGMENT_LENGTH: u32;
 
 @group(0) @binding(0) var<uniform> array_length : u32;
@@ -33,7 +5,7 @@ override SEGMENT_LENGTH: u32;
 @group(0) @binding(2) var<storage, read_write> prefix_sum : array<u32>;
 @group(0) @binding(3) var<storage, read_write> segment_sum : array<u32>;
 
-var<workgroup> workgroup_data: array<u32, SEGMENT_LENGTH>;
+var<workgroup> workgroup_data: array<u32, SEGMENT_LENGTH * 2u>;
 
 @compute
 @workgroup_size(SEGMENT_LENGTH, 1, 1)
@@ -50,14 +22,29 @@ fn compute(
 
     workgroupBarrier();
 
-    if(local_id.x == 0u) {
-        for(var i = 1u; i < SEGMENT_LENGTH; i++) {
-            workgroup_data[i] += workgroup_data[i - 1u];
+    var front = 0u;
+    var back = 1u;
+    for (var d = 1u; d < SEGMENT_LENGTH; d <<= 1u) {
+        let front_base_addr = front * SEGMENT_LENGTH;
+        let back_base_addr = back * SEGMENT_LENGTH;
+
+        if local_id.x >= d {
+            workgroup_data[back_base_addr + local_id.x] =
+                workgroup_data[front_base_addr + local_id.x] + workgroup_data[front_base_addr + local_id.x - d];
+        } else {
+            workgroup_data[back_base_addr + local_id.x] = workgroup_data[front_base_addr + local_id.x];
         }
-        segment_sum[segment_id.x] = workgroup_data[SEGMENT_LENGTH - 1u];
+
+        front ^= 1u;
+        back ^= 1u;
+
+        workgroupBarrier();
     }
 
-    workgroupBarrier();
+    let base_addr = front * SEGMENT_LENGTH;
+    prefix_sum[global_id.x] = workgroup_data[base_addr + local_id.x];
 
-    prefix_sum[global_id.x] = workgroup_data[local_id.x];
+    if local_id.x == SEGMENT_LENGTH - 1 {
+        segment_sum[segment_id.x] = workgroup_data[base_addr + SEGMENT_LENGTH - 1];
+    }
 }

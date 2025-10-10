@@ -22,7 +22,7 @@ fn compute(
 
     workgroupBarrier();
 
-    if(local_id.x == 0u) {
+    if local_id.x == 0u {
         for(var i = 1u; i < SEGMENT_LENGTH; i++) {
             workgroup_data[i] += workgroup_data[i - 1u];
         }

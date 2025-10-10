@@ -18,7 +18,7 @@ let c_array_length = 1000000;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
 let c_reduce_mode = 1; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
-let c_prefix_sum_mode = 2; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
+let c_prefix_sum_mode = 3; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
 
 let g_device: GPUDevice;
 
