@@ -16,8 +16,8 @@ import prefix_sum_blelloch_shader from "./shaders/prefix_sum_blelloch.wgsl?raw";
 let c_array_length = 1000000;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
-let c_reduce_mode = 3; // 0: native; 1: basic; 2: upsweep; 3: flatten
-let c_prefix_sum_mode = 2; // 0: native; 1: basic; 2: hs; 3: blelloch
+let c_reduce_mode = 3; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
+let c_prefix_sum_mode = 2; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
 
 let g_device: GPUDevice;
 
@@ -382,7 +382,7 @@ async function compute() {
             g_prefix_sum_hs_cum_kernel_list.forEach((kernel, index) => {
                 kernel.dispatch(g_prefix_sum_hs_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
             });
-        } else {
+        } else if (c_prefix_sum_mode == 3) {
 
         }
     }
@@ -421,7 +421,7 @@ async function inspect_output_prefix_sum() {
     } else if (c_prefix_sum_mode == 2) {
         console.log("prefix sum hs --->");
         await g_prefix_sum_hs_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
-    } else {
+    } else if (c_prefix_sum_mode == 3) {
         console.log("prefix sum blelloch --->");
     }
 }
