@@ -12,7 +12,7 @@ import prefix_sum_basic_shader from "./shaders/prefix_sum_basic.wgsl?raw";
 import prefix_sum_cum_shader from "./shaders/prefix_sum_cum.wgsl?raw";
 import prefix_sum_blelloch_shader from "./shaders/prefix_sum_blelloch.wgsl?raw";
 
-let c_array_length = 1000000;
+let c_array_length = 1000;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
 let c_reduce_mode = 3; // 0: native; 1: basic; 2: upsweep; 3: flatten
@@ -22,8 +22,9 @@ let g_device: GPUDevice;
 
 let g_prefix_sum_native_kernel: Kernel;
 
-let g_prefix_sum_basic_kernel: Kernel;
-let g_prefix_sum_cum_kernel: Kernel;
+let g_prefix_sum_basic_kernel_list: Kernel[] = [];
+let g_prefix_sum_basic_cum_kernel_list: Kernel[] = [];
+let g_prefix_sum_basic_dispatch_params: number[] = [];
 
 let g_reduce_native_kernel: Kernel;
 let g_reduce_basic_kernel_chain: Kernel[] = [];
@@ -232,33 +233,92 @@ function init_kernels_reduce() {
 }
 
 function init_kernels_prefix_sum() {
-    if (c_prefix_sum_mode == 0) {
+    function create_prefix_sum_kernels_recursively(
+        prefix_sum_shader: string,
+        prefix_sum_kernel_list: Kernel[],
+        cum_kernel_list: Kernel[],
+        dispatch_params: number[]) {
+
+        const prefix_sum_basic_kernel_builder = new KernelBuilder(g_device, "prefix_sum_kernel", prefix_sum_shader, "compute");
+
+        let kernel: Kernel;
+        let segment_cnt: number;
+
+        if (prefix_sum_kernel_list.length == 0) {
+            segment_cnt = Math.ceil(c_array_length / c_prefix_sum_kernel_segment_length);
+            dispatch_params.push(segment_cnt);
+
+            kernel = prefix_sum_basic_kernel_builder
+                .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
+                .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+                .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+                .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
+                .create_then_add_buffer("segment_sum", 3, BufferTypeEnum.STORAGE, segment_cnt * 4)
+                .build();
+        } else {
+            const last_idx = prefix_sum_kernel_list.length - 1;
+            const prev_output_length = dispatch_params[last_idx];
+
+            segment_cnt = Math.ceil(prev_output_length / c_prefix_sum_kernel_segment_length);
+            dispatch_params.push(segment_cnt);
+
+            kernel = prefix_sum_basic_kernel_builder
+                .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
+                .create_then_add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, 4)
+                .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, prefix_sum_kernel_list[last_idx].get_buffer("segment_sum"))
+                .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, prev_output_length * 4)
+                .create_then_add_buffer("segment_sum", 3, BufferTypeEnum.STORAGE, segment_cnt * 4)
+                .build();
+
+            const prev_output_length_buffer = new Uint32Array(1);
+            prev_output_length_buffer[0] = prev_output_length;
+            g_device.queue.writeBuffer(kernel.get_buffer("array_length"), 0, prev_output_length_buffer.buffer);
+        }
+        prefix_sum_kernel_list.push(kernel);
+        console.log(`created prefix sum kernel with dispatch param ${segment_cnt}`);
+
+
+        if (segment_cnt == 1) {
+            return kernel;
+        }
+
+        const next_kernel: Kernel = create_prefix_sum_kernels_recursively(
+            prefix_sum_shader,
+            prefix_sum_kernel_list,
+            cum_kernel_list,
+            dispatch_params
+        );
+
+        const prefix_sum_cum_kernel_builder = new KernelBuilder(g_device, "prefix_sum_cum_kernel", prefix_sum_cum_shader, "compute");
+        const cum_kernel: Kernel = prefix_sum_cum_kernel_builder
+            .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
+            .add_buffer("prefix_sum", 0, BufferTypeEnum.STORAGE, kernel.get_buffer("prefix_sum"))
+            .add_buffer("segment_prefix_sum", 1, BufferTypeEnum.READONLY_STORAGE, next_kernel.get_buffer("prefix_sum"))
+            .build();
+        cum_kernel_list.push(cum_kernel);
+
+        console.log(`created prefix sum CUM kernel with array length ${kernel.get_buffer("prefix_sum").size / 4}`);
+
+        return cum_kernel;
+    }
+
+    if (c_prefix_sum_mode == 0) { // native
         const prefix_sum_native_kernel_builder = new KernelBuilder(g_device, "prefix_sum_native", prefix_sum_native_shader, "compute");
         g_prefix_sum_native_kernel = prefix_sum_native_kernel_builder
             .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
             .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
             .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
             .build();
-    } else if (c_prefix_sum_mode == 1) {
-        const segment_cnt = Math.ceil(c_array_length / c_prefix_sum_kernel_segment_length);
-        const prefix_sum_basic_kernel_builder = new KernelBuilder(g_device, "prefix_sum_basic", prefix_sum_basic_shader, "compute");
-        g_prefix_sum_basic_kernel = prefix_sum_basic_kernel_builder
-            .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
-            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
-            .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
-            .create_then_add_buffer("prefix_sum_intermediate", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
-            .create_then_add_buffer("segment_sum", 3, BufferTypeEnum.STORAGE, segment_cnt * 4)
-            .build();
-
-        const prefix_sum_cum_kernel_builder = new KernelBuilder(g_device, "prefix_sum_cum", prefix_sum_cum_shader, "compute");
-        g_prefix_sum_cum_kernel = prefix_sum_cum_kernel_builder
-            .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
-            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
-            .add_buffer("prefix_sum", 1, BufferTypeEnum.STORAGE, g_prefix_sum_basic_kernel.get_buffer("prefix_sum_intermediate"))
-            .add_buffer("segment_sum", 2, BufferTypeEnum.READONLY_STORAGE, g_prefix_sum_basic_kernel.get_buffer("segment_sum"))
-            .build();
-    } else if (c_prefix_sum_mode == 2) {
+    } else if (c_prefix_sum_mode == 1) { // basic (segmented native scan + cum)
+        create_prefix_sum_kernels_recursively(
+            prefix_sum_basic_shader,
+            g_prefix_sum_basic_kernel_list,
+            g_prefix_sum_basic_cum_kernel_list,
+            g_prefix_sum_basic_dispatch_params);
+    } else if (c_prefix_sum_mode == 2) { // segmented h-s + cum
         ;
+    } else if (c_prefix_sum_mode == 3) { // segmented blelloch + cum
+
     }
 }
 
@@ -294,9 +354,14 @@ async function compute() {
         if (c_prefix_sum_mode == 0) {
             g_prefix_sum_native_kernel.dispatch(1, 1, 1, command_encoder);
         } else if (c_prefix_sum_mode == 1) {
-            const segment_cnt = Math.ceil(c_array_length / c_prefix_sum_kernel_segment_length);
-            g_prefix_sum_basic_kernel.dispatch(segment_cnt, 1, 1, command_encoder);
-            g_prefix_sum_cum_kernel.dispatch(segment_cnt, 1, 1, command_encoder);
+            g_prefix_sum_basic_kernel_list.forEach((kernel, index) => {
+                kernel.dispatch(g_prefix_sum_basic_dispatch_params[index], 1, 1, command_encoder);
+            });
+            g_prefix_sum_basic_cum_kernel_list.forEach((kernel, index) => {
+                kernel.dispatch(g_prefix_sum_basic_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
+            });
+        } else if (c_prefix_sum_mode == 2) {
+            ;
         }
     }
 
@@ -329,8 +394,7 @@ async function inspect_output_prefix_sum() {
         await g_prefix_sum_native_kernel.print_buffer_uint32("prefix_sum");
     } else if (c_prefix_sum_mode == 1) {
         console.log("prefix sum basic --->");
-        await g_prefix_sum_cum_kernel.print_buffer_uint32("prefix_sum");
-        await g_prefix_sum_cum_kernel.print_buffer_uint32("segment_sum");
+        await g_prefix_sum_basic_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
     } else if (c_prefix_sum_mode == 2) {
         ;
     }

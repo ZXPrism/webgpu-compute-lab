@@ -30,7 +30,7 @@ override SEGMENT_LENGTH: u32;
 
 @group(0) @binding(0) var<uniform> array_length : u32;
 @group(0) @binding(1) var<storage, read> input_array : array<u32>;
-@group(0) @binding(2) var<storage, read_write> prefix_sum_intermediate : array<u32>;
+@group(0) @binding(2) var<storage, read_write> prefix_sum : array<u32>;
 @group(0) @binding(3) var<storage, read_write> segment_sum : array<u32>;
 
 var<workgroup> workgroup_data: array<u32, SEGMENT_LENGTH>;
@@ -59,5 +59,5 @@ fn compute(
 
     workgroupBarrier();
 
-    prefix_sum_intermediate[global_id.x] = workgroup_data[local_id.x];
+    prefix_sum[global_id.x] = workgroup_data[local_id.x];
 }
