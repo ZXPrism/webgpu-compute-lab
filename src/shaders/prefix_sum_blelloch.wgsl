@@ -65,7 +65,7 @@ fn compute(
     }
 
     // note that blelloch is an exclusive scan, so when storing result we need to calculate the final element manually
-    if local_id.x > 0 {
+    if local_id.x > 0u {
         prefix_sum[global_id.x - 1u] = workgroup_data[local_id.x];
     } else {
         let final_idx = global_id.x + SEGMENT_LENGTH - 1u;
