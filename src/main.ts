@@ -14,11 +14,14 @@ import prefix_sum_cum_shader from "./shaders/prefix_sum_cum.wgsl?raw";
 import prefix_sum_hs_shader from "./shaders/prefix_sum_hs.wgsl?raw";
 import prefix_sum_blelloch_shader from "./shaders/prefix_sum_blelloch.wgsl?raw";
 
-let c_array_length = 1000000;
+import bubble_sort_shader from "./shaders/bubble_sort.wgsl?raw";
+
+let c_array_length = 100;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
 let c_reduce_mode = 3; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
 let c_prefix_sum_mode = 3; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
+let c_sort_mode = 0; // <0: skip; 0: bubble sort
 
 let g_device: GPUDevice;
 
@@ -45,6 +48,8 @@ let g_reduce_upsweep_kernel_dispatch_params: number[] = [];
 
 let g_reduce_flatten_kernel_chain: Kernel[] = [];
 let g_reduce_flatten_kernel_dispatch_params: number[] = [];
+
+let g_sort_bubble_kernel: Kernel;
 
 let g_array_length_buffer: GPUBuffer;
 let g_input_array_buffer: GPUBuffer;
@@ -347,9 +352,21 @@ function init_kernels_prefix_sum() {
     }
 }
 
+function init_kernels_sort() {
+    if (c_sort_mode == 0) { // bubble sort
+        const bubble_sort_kernel_builder = new KernelBuilder(g_device, "bubble_sort", bubble_sort_shader, "compute");
+        g_sort_bubble_kernel = bubble_sort_kernel_builder
+            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+            .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+            .create_then_add_buffer("sorted_array", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
+            .build();
+    }
+}
+
 function init_kernels() {
     init_kernels_prefix_sum();
     init_kernels_reduce();
+    init_kernels_sort();
 }
 
 async function compute() {
@@ -402,8 +419,15 @@ async function compute() {
         }
     }
 
+    function compute_sort() {
+        if (c_sort_mode == 0) {
+            g_sort_bubble_kernel.dispatch(1, 1, 1, command_encoder);
+        }
+    }
+
     compute_reduce();
     compute_prefix_sum();
+    compute_sort();
 
     t1 = performance.now();
     g_device.queue.submit([command_encoder.finish()]);
@@ -432,19 +456,39 @@ async function inspect_output_prefix_sum() {
         await g_prefix_sum_native_kernel.print_buffer_uint32("prefix_sum");
     } else if (c_prefix_sum_mode == 1) {
         console.log("prefix sum basic --->");
-        await g_prefix_sum_basic_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
+        if (g_prefix_sum_basic_cum_kernel_list.length == 0) {
+            await g_prefix_sum_basic_kernel_list[0].print_buffer_uint32("prefix_sum");
+        } else {
+            await g_prefix_sum_basic_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
+        }
     } else if (c_prefix_sum_mode == 2) {
         console.log("prefix sum hs --->");
-        await g_prefix_sum_hs_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
+        if (g_prefix_sum_hs_cum_kernel_list.length == 0) {
+            await g_prefix_sum_hs_kernel_list[0].print_buffer_uint32("prefix_sum");
+        } else {
+            await g_prefix_sum_hs_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
+        }
     } else if (c_prefix_sum_mode == 3) {
         console.log("prefix sum blelloch --->");
-        await g_prefix_sum_blelloch_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
+        if (g_prefix_sum_blelloch_cum_kernel_list.length == 0) {
+            await g_prefix_sum_blelloch_kernel_list[0].print_buffer_uint32("prefix_sum");
+        } else {
+            await g_prefix_sum_blelloch_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
+        }
+    }
+}
+
+async function inspect_output_sort() {
+    if (c_sort_mode == 0) {
+        console.log("bubble sort --->");
+        g_sort_bubble_kernel.print_buffer_uint32("sorted_array");
     }
 }
 
 async function inspect_output() {
     await inspect_output_reduce();
     await inspect_output_prefix_sum();
+    await inspect_output_sort();
 
     t2 = performance.now();
     console.log("[submit ----> inspect output] cpu time: ", t2 - t1, "ms")
