@@ -2,7 +2,8 @@ import { BufferTypeEnum } from "./buffer_info";
 import type { Kernel } from "./kernel";
 import { KernelBuilder } from "./kernel_builder";
 
-import reduce_shader from "./shaders/reduce_basic.wgsl?raw";
+//import reduce_basic_shader from "./shaders/reduce_basic.wgsl?raw";
+import reduce_basic_shader from "./shaders/reduce_basic_double_buffer.wgsl?raw";
 import reduce_native_shader from "./shaders/reduce_native.wgsl?raw";
 import reduce_upsweep_shader from "./shaders/reduce_upsweep.wgsl?raw";
 import reduce_flatten_shader from "./shaders/reduce_flatten.wgsl?raw";
@@ -16,7 +17,7 @@ import prefix_sum_blelloch_shader from "./shaders/prefix_sum_blelloch.wgsl?raw";
 let c_array_length = 1000000;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
-let c_reduce_mode = 3; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
+let c_reduce_mode = 1; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
 let c_prefix_sum_mode = 2; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
 
 let g_device: GPUDevice;
@@ -138,7 +139,7 @@ function init_kernels_reduce() {
 
             g_reduce_basic_kernel_dispatch_params.push(curr_output_length);
 
-            const reduce_kernel_builder = new KernelBuilder(g_device, "reduce", reduce_shader, "compute");
+            const reduce_kernel_builder = new KernelBuilder(g_device, "reduce", reduce_basic_shader, "compute");
 
             let reduce_kernel: Kernel;
             if (i == 1) { // first pass
