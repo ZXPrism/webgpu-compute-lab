@@ -10,13 +10,14 @@ import reduce_flatten_shader from "./shaders/reduce_flatten.wgsl?raw";
 import prefix_sum_native_shader from "./shaders/prefix_sum_native.wgsl?raw";
 import prefix_sum_basic_shader from "./shaders/prefix_sum_basic_2.wgsl?raw";
 import prefix_sum_cum_shader from "./shaders/prefix_sum_cum.wgsl?raw";
+import prefix_sum_hs_shader from "./shaders/prefix_sum_hs.wgsl?raw";
 import prefix_sum_blelloch_shader from "./shaders/prefix_sum_blelloch.wgsl?raw";
 
-let c_array_length = 10000;
+let c_array_length = 1000000;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
 let c_reduce_mode = 3; // 0: native; 1: basic; 2: upsweep; 3: flatten
-let c_prefix_sum_mode = 1; // 0: native
+let c_prefix_sum_mode = 2; // 0: native; 1: basic; 2: hs; 3: blelloch
 
 let g_device: GPUDevice;
 
@@ -25,6 +26,10 @@ let g_prefix_sum_native_kernel: Kernel;
 let g_prefix_sum_basic_kernel_list: Kernel[] = [];
 let g_prefix_sum_basic_cum_kernel_list: Kernel[] = [];
 let g_prefix_sum_basic_dispatch_params: number[] = [];
+
+let g_prefix_sum_hs_kernel_list: Kernel[] = [];
+let g_prefix_sum_hs_cum_kernel_list: Kernel[] = [];
+let g_prefix_sum_hs_dispatch_params: number[] = [];
 
 let g_reduce_native_kernel: Kernel;
 let g_reduce_basic_kernel_chain: Kernel[] = [];
@@ -39,6 +44,9 @@ let g_reduce_flatten_kernel_dispatch_params: number[] = [];
 let g_array_length_buffer: GPUBuffer;
 let g_input_array_buffer: GPUBuffer;
 let g_input_array_sum: number = 0;
+
+let t1: DOMHighResTimeStamp;
+let t2: DOMHighResTimeStamp;
 
 async function init_webgpu() {
     const adapter = await navigator.gpu?.requestAdapter();
@@ -315,9 +323,15 @@ function init_kernels_prefix_sum() {
             prefix_sum_basic_shader,
             g_prefix_sum_basic_kernel_list,
             g_prefix_sum_basic_cum_kernel_list,
-            g_prefix_sum_basic_dispatch_params);
+            g_prefix_sum_basic_dispatch_params
+        );
     } else if (c_prefix_sum_mode == 2) { // segmented h-s + cum
-        ;
+        create_prefix_sum_kernels_recursively(
+            prefix_sum_hs_shader,
+            g_prefix_sum_hs_kernel_list,
+            g_prefix_sum_hs_cum_kernel_list,
+            g_prefix_sum_hs_dispatch_params
+        );
     } else if (c_prefix_sum_mode == 3) { // segmented blelloch + cum
 
     }
@@ -362,13 +376,21 @@ async function compute() {
                 kernel.dispatch(g_prefix_sum_basic_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
             });
         } else if (c_prefix_sum_mode == 2) {
-            ;
+            g_prefix_sum_hs_kernel_list.forEach((kernel, index) => {
+                kernel.dispatch(g_prefix_sum_hs_dispatch_params[index], 1, 1, command_encoder);
+            });
+            g_prefix_sum_hs_cum_kernel_list.forEach((kernel, index) => {
+                kernel.dispatch(g_prefix_sum_hs_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
+            });
+        } else {
+
         }
     }
 
     compute_reduce();
     compute_prefix_sum();
 
+    t1 = performance.now();
     g_device.queue.submit([command_encoder.finish()]);
 }
 
@@ -397,13 +419,19 @@ async function inspect_output_prefix_sum() {
         console.log("prefix sum basic --->");
         await g_prefix_sum_basic_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
     } else if (c_prefix_sum_mode == 2) {
-        ;
+        console.log("prefix sum hs --->");
+        await g_prefix_sum_hs_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
+    } else {
+        console.log("prefix sum blelloch --->");
     }
 }
 
 async function inspect_output() {
     await inspect_output_reduce();
     await inspect_output_prefix_sum();
+
+    t2 = performance.now();
+    console.log("[submit ----> inspect output] cpu time: ", t2 - t1, "ms")
 }
 
 async function main() {
