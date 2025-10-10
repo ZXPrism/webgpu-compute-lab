@@ -15,13 +15,15 @@ import prefix_sum_hs_shader from "./shaders/prefix_sum_hs.wgsl?raw";
 import prefix_sum_blelloch_shader from "./shaders/prefix_sum_blelloch.wgsl?raw";
 
 import bubble_sort_shader from "./shaders/bubble_sort.wgsl?raw";
+import bubble_sort_block_shader from "./shaders/bubble_sort_block.wgsl?raw";
 
-let c_array_length = 100;
+let c_array_length = 100000;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
+let c_sort_kernel_segment_length = 256;
 let c_reduce_mode = 3; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
 let c_prefix_sum_mode = 3; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
-let c_sort_mode = 0; // <0: skip; 0: bubble sort
+let c_sort_mode = 1; // <0: skip; 0: bubble sort; 1: bubble sort block
 
 let g_device: GPUDevice;
 
@@ -50,6 +52,7 @@ let g_reduce_flatten_kernel_chain: Kernel[] = [];
 let g_reduce_flatten_kernel_dispatch_params: number[] = [];
 
 let g_sort_bubble_kernel: Kernel;
+let g_sort_bubble_block_kernel: Kernel;
 
 let g_array_length_buffer: GPUBuffer;
 let g_input_array_buffer: GPUBuffer;
@@ -360,6 +363,14 @@ function init_kernels_sort() {
             .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
             .create_then_add_buffer("sorted_array", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
             .build();
+    } else if (c_sort_mode == 1) { // bubble sort block
+        const bubble_sort_block_kernel_builder = new KernelBuilder(g_device, "bubble_sort_block", bubble_sort_block_shader, "compute");
+        g_sort_bubble_block_kernel = bubble_sort_block_kernel_builder
+            .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
+            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+            .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+            .create_then_add_buffer("sorted_array", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
+            .build();
     }
 }
 
@@ -422,6 +433,8 @@ async function compute() {
     function compute_sort() {
         if (c_sort_mode == 0) {
             g_sort_bubble_kernel.dispatch(1, 1, 1, command_encoder);
+        } else if (c_sort_mode == 1) {
+            g_sort_bubble_block_kernel.dispatch(Math.ceil(c_array_length / c_prefix_sum_kernel_segment_length), 1, 1, command_encoder);
         }
     }
 
@@ -482,6 +495,9 @@ async function inspect_output_sort() {
     if (c_sort_mode == 0) {
         console.log("bubble sort --->");
         g_sort_bubble_kernel.print_buffer_uint32("sorted_array");
+    } else if (c_sort_mode == 1) {
+        console.log("bubble sort block --->");
+        g_sort_bubble_block_kernel.print_buffer_uint32("sorted_array");
     }
 }
 
