@@ -8,11 +8,11 @@ import reduce_upsweep_shader from "./shaders/reduce_upsweep.wgsl?raw";
 import reduce_flatten_shader from "./shaders/reduce_flatten.wgsl?raw";
 
 import prefix_sum_native_shader from "./shaders/prefix_sum_native.wgsl?raw";
-import prefix_sum_basic_shader from "./shaders/prefix_sum_basic.wgsl?raw";
+import prefix_sum_basic_shader from "./shaders/prefix_sum_basic_2.wgsl?raw";
 import prefix_sum_cum_shader from "./shaders/prefix_sum_cum.wgsl?raw";
 import prefix_sum_blelloch_shader from "./shaders/prefix_sum_blelloch.wgsl?raw";
 
-let c_array_length = 1000;
+let c_array_length = 10000;
 let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
 let c_reduce_mode = 3; // 0: native; 1: basic; 2: upsweep; 3: flatten
@@ -292,8 +292,9 @@ function init_kernels_prefix_sum() {
         const prefix_sum_cum_kernel_builder = new KernelBuilder(g_device, "prefix_sum_cum_kernel", prefix_sum_cum_shader, "compute");
         const cum_kernel: Kernel = prefix_sum_cum_kernel_builder
             .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
-            .add_buffer("prefix_sum", 0, BufferTypeEnum.STORAGE, kernel.get_buffer("prefix_sum"))
-            .add_buffer("segment_prefix_sum", 1, BufferTypeEnum.READONLY_STORAGE, next_kernel.get_buffer("prefix_sum"))
+            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, kernel.get_buffer("array_length"))
+            .add_buffer("prefix_sum", 1, BufferTypeEnum.STORAGE, kernel.get_buffer("prefix_sum"))
+            .add_buffer("segment_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, next_kernel.get_buffer("prefix_sum"))
             .build();
         cum_kernel_list.push(cum_kernel);
 

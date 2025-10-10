@@ -14,7 +14,7 @@ fn compute(
 ) {
     let base_addr = segment_id.x * SEGMENT_LENGTH;
     prefix_sum[base_addr] = input_array[base_addr];
-    for(var i = 1u; i < SEGMENT_LENGTH; i++) {
+    for(var i = 1u; i < SEGMENT_LENGTH && base_addr + i < array_length; i++) {
         let curr_addr = base_addr + i;
         prefix_sum[curr_addr] = prefix_sum[curr_addr - 1u] + input_array[curr_addr];
     }
