@@ -3,7 +3,7 @@ from rich import print
 
 
 # cfg
-N = 100
+N = 10
 MAX_VAL = int(1e9)
 radix_bits = 8  # must divide 32
 bucket_size = 1 << radix_bits
@@ -31,9 +31,9 @@ for i in range(0, 32, radix_bits):
 
     # scatter
     for elem in input_array:
-        label = elem >> i & mask
-        sorted_array[psum[label]] = elem
-        psum[label] += 1
+        slot = elem >> i & mask
+        sorted_array[psum[slot]] = elem
+        psum[slot] += 1
 
     input_array, sorted_array = sorted_array, input_array
 
