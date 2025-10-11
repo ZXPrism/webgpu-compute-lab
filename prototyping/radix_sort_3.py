@@ -1,4 +1,4 @@
-# based on radix_sort_2.py, I think I can optimize it even further
+# based on radix_sort_2.py, I think I can optimize it even further..
 
 import random
 from rich import print
@@ -7,7 +7,7 @@ from rich import print
 # cfg
 N = 10
 MAX_VAL = int(1e6)
-radix_bits = 8  # must divide 32
+radix_bits = 4  # must divide 32?
 bucket_size = 1 << radix_bits
 mask = bucket_size - 1
 
