@@ -58,6 +58,11 @@ for i in range(0, 32, radix_bits):
     psum = [[0] * bucket_size for _ in range(N)]
     tot = [0] * bucket_size
 
+    # this is not GPU-friendly tho, since the inner loop should be parallelly executed
+    # but typically we operate on input array with length N in parallel, which is the outer loop
+    # simply, we want `for j in range(bucket_size)` to be the outer loop
+    # if we want to make it GPU-friendly, I think, we should transpose the array
+    # but if we do transpose, we just get back to the unoptimized state
     for j in range(1, N):
         slot = input_array[j - 1] >> i & mask
         for k in range(bucket_size):
@@ -70,6 +75,7 @@ for i in range(0, 32, radix_bits):
     tot[final_slot] += 1
 
     # psum of each slot sizes, exclusive too
+    # can be efficiently done on GPU
     psum_slot_size = [0] * bucket_size
     for j in range(1, bucket_size):
         # the if statement below can be eliminated with the same reason above
