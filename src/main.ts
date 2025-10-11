@@ -23,8 +23,8 @@ let c_reduce_kernel_segment_length = 256;
 let c_prefix_sum_kernel_segment_length = 256;
 let c_sort_kernel_segment_length = 256;
 let c_radix_sort_bits = 8;
-let c_reduce_mode = 3; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
-let c_prefix_sum_mode = 3; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
+let c_reduce_mode = -1; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
+let c_prefix_sum_mode = -1; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
 let c_sort_mode = 2; // <0: skip; 0: bubble sort; 1: bubble sort block; 2: radix sort block
 
 let g_device: GPUDevice;
@@ -55,7 +55,7 @@ let g_reduce_flatten_kernel_dispatch_params: number[] = [];
 
 let g_sort_bubble_kernel: Kernel;
 let g_sort_bubble_block_kernel: Kernel;
-let g_sort_radix_sort_block_kernel: Kernel;
+let g_sort_radix_sort_block_kernel_chain: Kernel[] = [];
 
 let g_array_length_buffer: GPUBuffer;
 let g_input_array_buffer: GPUBuffer;
@@ -105,9 +105,10 @@ function init_input_array() {
     });
     const input_array_buffer = new Uint32Array(c_array_length);
     for (let i = 0; i < c_array_length; i++) {
-        input_array_buffer[i] = Math.floor(Math.random() * 15);
+        // input_array_buffer[i] = Math.floor(Math.random() * 15);
         // for radix sort test
         // input_array_buffer[i] = c_array_length - i - 1;
+        input_array_buffer[i] = Math.floor(Math.random() * 0xfffffff);
     }
     g_device.queue.writeBuffer(g_input_array_buffer, 0, input_array_buffer.buffer);
     console.info("[input array]: ", input_array_buffer);
@@ -377,15 +378,30 @@ function init_kernels_sort() {
             .create_then_add_buffer("sorted_array", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
             .build();
     } else if (c_sort_mode == 2) { // radix sort block
-        const radix_sort_block_kernel_builder = new KernelBuilder(g_device, "radix_block", radix_sort_block_shader, "compute");
-        g_sort_radix_sort_block_kernel = radix_sort_block_kernel_builder
-            .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
-            .add_constant("RADIX_BITS", c_radix_sort_bits)
-            .add_constant("RIGHT_SHIFT_BITS", 0)
-            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
-            .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
-            .create_then_add_buffer("sorted_array", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
-            .build();
+        for (let i = 0; i < 32; i += c_radix_sort_bits) { // assume key is 32-bit
+            const radix_sort_block_kernel_builder = new KernelBuilder(g_device, "radix_block", radix_sort_block_shader, "compute");
+            let kernel: Kernel;
+            if (i == 0) {
+                kernel = radix_sort_block_kernel_builder
+                    .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
+                    .add_constant("RADIX_BITS", c_radix_sort_bits)
+                    .add_constant("RIGHT_SHIFT_BITS", 0)
+                    .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+                    .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+                    .create_then_add_buffer("sorted_array", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .build();
+            } else {
+                kernel = radix_sort_block_kernel_builder
+                    .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
+                    .add_constant("RADIX_BITS", c_radix_sort_bits)
+                    .add_constant("RIGHT_SHIFT_BITS", i)
+                    .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+                    .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_block_kernel_chain.at(-1)?.get_buffer("sorted_array")!)
+                    .create_then_add_buffer("sorted_array", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .build();
+            }
+            g_sort_radix_sort_block_kernel_chain.push(kernel);
+        }
     }
 }
 
@@ -451,7 +467,9 @@ async function compute() {
         } else if (c_sort_mode == 1) {
             g_sort_bubble_block_kernel.dispatch(Math.ceil(c_array_length / c_sort_kernel_segment_length), 1, 1, command_encoder);
         } else if (c_sort_mode == 2) {
-            g_sort_radix_sort_block_kernel.dispatch(Math.ceil(c_array_length / c_sort_kernel_segment_length), 1, 1, command_encoder);
+            g_sort_radix_sort_block_kernel_chain.forEach((kernel) => {
+                kernel.dispatch(Math.ceil(c_array_length / c_sort_kernel_segment_length), 1, 1, command_encoder);
+            });
         }
     }
 
@@ -517,7 +535,7 @@ async function inspect_output_sort() {
         await g_sort_bubble_block_kernel.print_buffer_uint32("sorted_array");
     } else if (c_sort_mode == 2) {
         console.log("radix sort block --->");
-        await g_sort_radix_sort_block_kernel.print_buffer_uint32("sorted_array");
+        await g_sort_radix_sort_block_kernel_chain.at(-1)?.print_buffer_uint32("sorted_array");
     }
 }
 
