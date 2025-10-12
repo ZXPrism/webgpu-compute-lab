@@ -18,30 +18,17 @@ import bubble_sort_shader from "./shaders/bubble_sort.wgsl?raw";
 import bubble_sort_block_shader from "./shaders/bubble_sort_block.wgsl?raw";
 import radix_sort_block_shader from "./shaders/radix_sort_block.wgsl?raw";
 
-let c_array_length = 100000;
-let c_reduce_kernel_segment_length = 256;
-let c_prefix_sum_kernel_segment_length = 256;
-let c_sort_kernel_segment_length = 256;
-let c_radix_sort_bits = 2;
-let c_reduce_mode = -1; // <0: skip; 0: native; 1: basic; 2: upsweep; 3: flatten
-let c_prefix_sum_mode = -1; // <0: skip; 0: native; 1: basic; 2: hs; 3: blelloch
-let c_sort_mode = 2; // <0: skip; 0: bubble sort; 1: bubble sort block; 2: radix sort block
+import radix_sort_full_prefix_sum_shader from "./shaders/radix_sort_full_prefix_sum.wgsl?raw";
+import radix_sort_full_scatter_shader from "./shaders/radix_sort_full_scatter.wgsl?raw";
+import { c_array_length, c_reduce_mode, c_reduce_kernel_segment_length, c_prefix_sum_kernel_segment_length, c_prefix_sum_mode, c_sort_mode, c_sort_kernel_segment_length, c_radix_sort_bits } from "./config";
+import { PrefixSumKernel } from "./prefix_sum_kernel";
 
 let g_device: GPUDevice;
 
 let g_prefix_sum_native_kernel: Kernel;
-
-let g_prefix_sum_basic_kernel_list: Kernel[] = [];
-let g_prefix_sum_basic_cum_kernel_list: Kernel[] = [];
-let g_prefix_sum_basic_dispatch_params: number[] = [];
-
-let g_prefix_sum_hs_kernel_list: Kernel[] = [];
-let g_prefix_sum_hs_cum_kernel_list: Kernel[] = [];
-let g_prefix_sum_hs_dispatch_params: number[] = [];
-
-let g_prefix_sum_blelloch_kernel_list: Kernel[] = [];
-let g_prefix_sum_blelloch_cum_kernel_list: Kernel[] = [];
-let g_prefix_sum_blelloch_dispatch_params: number[] = [];
+let g_prefix_sum_basic_kernel: PrefixSumKernel;
+let g_prefix_sum_hs_kernel: PrefixSumKernel;
+let g_prefix_sum_blelloch_kernel: PrefixSumKernel;
 
 let g_reduce_native_kernel: Kernel;
 let g_reduce_basic_kernel_chain: Kernel[] = [];
@@ -55,7 +42,14 @@ let g_reduce_flatten_kernel_dispatch_params: number[] = [];
 
 let g_sort_bubble_kernel: Kernel;
 let g_sort_bubble_block_kernel: Kernel;
+
 let g_sort_radix_sort_block_kernel_chain: Kernel[] = [];
+
+let g_sort_radix_sort_full_kernel_chain: Kernel[] = [];
+let g_sort_radix_sort_prefix_sum_blelloch_kernel_list: Kernel[] = [];
+let g_sort_radix_sort_prefix_sum_blelloch_cum_kernel_list: Kernel[] = [];
+let g_sort_radix_sort_prefix_sum_blelloch_dispatch_params: number[] = [];
+let g_sort_radix_sort_full_scatter_kernel_chain: Kernel[] = [];
 
 let g_array_length_buffer: GPUBuffer;
 let g_input_array_buffer: GPUBuffer;
@@ -338,26 +332,11 @@ function init_kernels_prefix_sum() {
             .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
             .build();
     } else if (c_prefix_sum_mode == 1) { // basic (segmented native scan + cum)
-        create_prefix_sum_kernels_recursively(
-            prefix_sum_basic_shader,
-            g_prefix_sum_basic_kernel_list,
-            g_prefix_sum_basic_cum_kernel_list,
-            g_prefix_sum_basic_dispatch_params
-        );
+        g_prefix_sum_basic_kernel = new PrefixSumKernel(g_device, prefix_sum_basic_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer);
     } else if (c_prefix_sum_mode == 2) { // segmented h-s + cum
-        create_prefix_sum_kernels_recursively(
-            prefix_sum_hs_shader,
-            g_prefix_sum_hs_kernel_list,
-            g_prefix_sum_hs_cum_kernel_list,
-            g_prefix_sum_hs_dispatch_params
-        );
+        g_prefix_sum_hs_kernel = new PrefixSumKernel(g_device, prefix_sum_hs_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer);
     } else if (c_prefix_sum_mode == 3) { // segmented blelloch + cum
-        create_prefix_sum_kernels_recursively(
-            prefix_sum_blelloch_shader,
-            g_prefix_sum_blelloch_kernel_list,
-            g_prefix_sum_blelloch_cum_kernel_list,
-            g_prefix_sum_blelloch_dispatch_params
-        );
+        g_prefix_sum_blelloch_kernel = new PrefixSumKernel(g_device, prefix_sum_blelloch_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer);
     }
 }
 
@@ -402,6 +381,62 @@ function init_kernels_sort() {
             }
             g_sort_radix_sort_block_kernel_chain.push(kernel);
         }
+    } else if (c_sort_mode == 3) { // full radix sort
+        const wg_cnt = Math.ceil(c_array_length / c_sort_kernel_segment_length);
+
+        for (let i = 0; i < 32; i += c_radix_sort_bits) { // assume key is 32-bit
+            const radix_sort_kernel_builder = new KernelBuilder(g_device, "radix_full", radix_sort_full_prefix_sum_shader, "compute");
+            const radix_sort_scatter_kernel_builder = new KernelBuilder(g_device, "radix_full_scatter", radix_sort_full_scatter_shader, "compute");
+            let kernel: Kernel;
+            if (i == 0) {
+                kernel = radix_sort_kernel_builder
+                    .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
+                    .add_constant("RADIX_BITS", c_radix_sort_bits)
+                    .add_constant("RIGHT_SHIFT_BITS", 0)
+                    .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+                    .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+                    .create_then_add_buffer("slot_size", 2, BufferTypeEnum.STORAGE, (1 << c_radix_sort_bits) * wg_cnt * 4)
+                    .create_then_add_buffer("local_prefix_sum", 3, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .build();
+            } else {
+                kernel = radix_sort_kernel_builder
+                    .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
+                    .add_constant("RADIX_BITS", c_radix_sort_bits)
+                    .add_constant("RIGHT_SHIFT_BITS", i)
+                    .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+                    .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_scatter_kernel_chain.at(-1)?.get_buffer("sorted_array")!)
+                    .create_then_add_buffer("slot_size", 2, BufferTypeEnum.STORAGE, (1 << c_radix_sort_bits) * wg_cnt * 4)
+                    .create_then_add_buffer("local_prefix_sum", 3, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .build();
+            }
+            g_sort_radix_sort_full_kernel_chain.push(kernel);
+
+            // scatter
+            if (i == 0) {
+                kernel = radix_sort_scatter_kernel_builder
+                    .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
+                    .add_constant("RADIX_BITS", c_radix_sort_bits)
+                    .add_constant("RIGHT_SHIFT_BITS", 0)
+                    .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+                    .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
+                    .add_buffer("slot_size_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("slot_size")!)
+                    .add_buffer("local_prefix_sum", 3, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("local_prefix_sum")!)
+                    .create_then_add_buffer("sorted_array", 4, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .build();
+            } else {
+                kernel = radix_sort_scatter_kernel_builder
+                    .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
+                    .add_constant("RADIX_BITS", c_radix_sort_bits)
+                    .add_constant("RIGHT_SHIFT_BITS", i)
+                    .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
+                    .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_scatter_kernel_chain.at(-1)?.get_buffer("sorted_array")!)
+                    .add_buffer("slot_size_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("slot_size")!)
+                    .add_buffer("local_prefix_sum", 3, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("local_prefix_sum")!)
+                    .create_then_add_buffer("sorted_array", 4, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .build();
+            }
+            g_sort_radix_sort_full_scatter_kernel_chain.push(kernel);
+        }
     }
 }
 
@@ -438,26 +473,17 @@ async function compute() {
         if (c_prefix_sum_mode == 0) {
             g_prefix_sum_native_kernel.dispatch(1, 1, 1, command_encoder);
         } else if (c_prefix_sum_mode == 1) {
-            g_prefix_sum_basic_kernel_list.forEach((kernel, index) => {
-                kernel.dispatch(g_prefix_sum_basic_dispatch_params[index], 1, 1, command_encoder);
-            });
-            g_prefix_sum_basic_cum_kernel_list.forEach((kernel, index) => {
-                kernel.dispatch(g_prefix_sum_basic_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
-            });
+            g_prefix_sum_basic_kernel.dispatch(command_encoder);
         } else if (c_prefix_sum_mode == 2) {
-            g_prefix_sum_hs_kernel_list.forEach((kernel, index) => {
-                kernel.dispatch(g_prefix_sum_hs_dispatch_params[index], 1, 1, command_encoder);
-            });
-            g_prefix_sum_hs_cum_kernel_list.forEach((kernel, index) => {
-                kernel.dispatch(g_prefix_sum_hs_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
-            });
+            g_prefix_sum_hs_kernel.dispatch(command_encoder);
         } else if (c_prefix_sum_mode == 3) {
-            g_prefix_sum_blelloch_kernel_list.forEach((kernel, index) => {
-                kernel.dispatch(g_prefix_sum_blelloch_dispatch_params[index], 1, 1, command_encoder);
-            });
-            g_prefix_sum_blelloch_cum_kernel_list.forEach((kernel, index) => {
-                kernel.dispatch(g_prefix_sum_blelloch_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
-            });
+            // g_prefix_sum_blelloch_kernel_list.forEach((kernel, index) => {
+            //     kernel.dispatch(g_prefix_sum_blelloch_dispatch_params[index], 1, 1, command_encoder);
+            // });
+            // g_prefix_sum_blelloch_cum_kernel_list.forEach((kernel, index) => {
+            //     kernel.dispatch(g_prefix_sum_blelloch_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
+            // });
+            g_prefix_sum_blelloch_kernel.dispatch(command_encoder);
         }
     }
 
@@ -469,6 +495,13 @@ async function compute() {
         } else if (c_sort_mode == 2) {
             g_sort_radix_sort_block_kernel_chain.forEach((kernel) => {
                 kernel.dispatch(Math.ceil(c_array_length / c_sort_kernel_segment_length), 1, 1, command_encoder);
+            });
+        } else if (c_sort_mode == 3) {
+            const wg_cnt = Math.ceil(c_array_length / c_sort_kernel_segment_length);
+
+            g_sort_radix_sort_full_kernel_chain.forEach((kernel, index) => {
+                kernel.dispatch(wg_cnt, 1, 1, command_encoder);
+                g_sort_radix_sort_full_scatter_kernel_chain[index].dispatch(wg_cnt, 1, 1, command_encoder);
             });
         }
     }
@@ -504,25 +537,13 @@ async function inspect_output_prefix_sum() {
         await g_prefix_sum_native_kernel.print_buffer_uint32("prefix_sum");
     } else if (c_prefix_sum_mode == 1) {
         console.log("prefix sum basic --->");
-        if (g_prefix_sum_basic_cum_kernel_list.length == 0) {
-            await g_prefix_sum_basic_kernel_list[0].print_buffer_uint32("prefix_sum");
-        } else {
-            await g_prefix_sum_basic_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
-        }
+        await g_prefix_sum_basic_kernel.inspect();
     } else if (c_prefix_sum_mode == 2) {
         console.log("prefix sum hs --->");
-        if (g_prefix_sum_hs_cum_kernel_list.length == 0) {
-            await g_prefix_sum_hs_kernel_list[0].print_buffer_uint32("prefix_sum");
-        } else {
-            await g_prefix_sum_hs_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
-        }
+        await g_prefix_sum_hs_kernel.inspect();
     } else if (c_prefix_sum_mode == 3) {
         console.log("prefix sum blelloch --->");
-        if (g_prefix_sum_blelloch_cum_kernel_list.length == 0) {
-            await g_prefix_sum_blelloch_kernel_list[0].print_buffer_uint32("prefix_sum");
-        } else {
-            await g_prefix_sum_blelloch_cum_kernel_list.at(-1)?.print_buffer_uint32("prefix_sum");
-        }
+        await g_prefix_sum_blelloch_kernel.inspect();
     }
 }
 
@@ -536,6 +557,9 @@ async function inspect_output_sort() {
     } else if (c_sort_mode == 2) {
         console.log("radix sort block --->");
         await g_sort_radix_sort_block_kernel_chain.at(-1)?.print_buffer_uint32("sorted_array");
+    } else if (c_sort_mode == 3) {
+        console.log("radix sort full --->");
+        await g_sort_radix_sort_full_scatter_kernel_chain.at(-1)?.print_buffer_uint32("sorted_array");
     }
 }
 
