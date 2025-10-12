@@ -20,7 +20,7 @@ import radix_sort_block_shader from "./shaders/radix_sort_block.wgsl?raw";
 
 import radix_sort_full_prefix_sum_shader from "./shaders/radix_sort_full_prefix_sum.wgsl?raw";
 import radix_sort_full_scatter_shader from "./shaders/radix_sort_full_scatter.wgsl?raw";
-import { c_array_length, c_reduce_mode, c_reduce_kernel_segment_length, c_prefix_sum_kernel_segment_length, c_prefix_sum_mode, c_sort_mode, c_sort_kernel_segment_length, c_radix_sort_bits } from "./config";
+import { c_array_length, c_reduce_mode, c_reduce_kernel_segment_length, c_prefix_sum_mode, c_sort_mode, c_sort_kernel_segment_length, c_radix_sort_bits, c_sort_slot_size_buffer_length, c_sort_wg_cnt } from "./config";
 import { PrefixSumKernel } from "./prefix_sum_kernel";
 
 let g_device: GPUDevice;
@@ -46,9 +46,7 @@ let g_sort_bubble_block_kernel: Kernel;
 let g_sort_radix_sort_block_kernel_chain: Kernel[] = [];
 
 let g_sort_radix_sort_full_kernel_chain: Kernel[] = [];
-let g_sort_radix_sort_prefix_sum_blelloch_kernel_list: Kernel[] = [];
-let g_sort_radix_sort_prefix_sum_blelloch_cum_kernel_list: Kernel[] = [];
-let g_sort_radix_sort_prefix_sum_blelloch_dispatch_params: number[] = [];
+let g_sort_radix_sort_full_prefix_sum_kernel_chain: PrefixSumKernel[] = [];
 let g_sort_radix_sort_full_scatter_kernel_chain: Kernel[] = [];
 
 let g_array_length_buffer: GPUBuffer;
@@ -95,13 +93,14 @@ function init_input_array() {
     g_input_array_buffer = g_device.createBuffer({
         label: 'input array buffer',
         size: c_array_length * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     const input_array_buffer = new Uint32Array(c_array_length);
     for (let i = 0; i < c_array_length; i++) {
         // input_array_buffer[i] = Math.floor(Math.random() * 15);
         // for radix sort test
         // input_array_buffer[i] = c_array_length - i - 1;
+        // input_array_buffer[i] = (c_array_length - i - 1) % 16;
         input_array_buffer[i] = Math.floor(Math.random() * 0xfffffff);
     }
     g_device.queue.writeBuffer(g_input_array_buffer, 0, input_array_buffer.buffer);
@@ -254,76 +253,6 @@ function init_kernels_reduce() {
 }
 
 function init_kernels_prefix_sum() {
-    function create_prefix_sum_kernels_recursively(
-        prefix_sum_shader: string,
-        prefix_sum_kernel_list: Kernel[],
-        cum_kernel_list: Kernel[],
-        dispatch_params: number[]) {
-
-        const prefix_sum_basic_kernel_builder = new KernelBuilder(g_device, "prefix_sum_kernel", prefix_sum_shader, "compute");
-
-        let kernel: Kernel;
-        let segment_cnt: number;
-
-        if (prefix_sum_kernel_list.length == 0) {
-            segment_cnt = Math.ceil(c_array_length / c_prefix_sum_kernel_segment_length);
-            dispatch_params.push(segment_cnt);
-
-            kernel = prefix_sum_basic_kernel_builder
-                .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
-                .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
-                .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
-                .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
-                .create_then_add_buffer("segment_sum", 3, BufferTypeEnum.STORAGE, segment_cnt * 4)
-                .build();
-        } else {
-            const last_idx = prefix_sum_kernel_list.length - 1;
-            const prev_output_length = dispatch_params[last_idx];
-
-            segment_cnt = Math.ceil(prev_output_length / c_prefix_sum_kernel_segment_length);
-            dispatch_params.push(segment_cnt);
-
-            kernel = prefix_sum_basic_kernel_builder
-                .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
-                .create_then_add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, 4)
-                .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, prefix_sum_kernel_list[last_idx].get_buffer("segment_sum"))
-                .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, prev_output_length * 4)
-                .create_then_add_buffer("segment_sum", 3, BufferTypeEnum.STORAGE, segment_cnt * 4)
-                .build();
-
-            const prev_output_length_buffer = new Uint32Array(1);
-            prev_output_length_buffer[0] = prev_output_length;
-            g_device.queue.writeBuffer(kernel.get_buffer("array_length"), 0, prev_output_length_buffer.buffer);
-        }
-        prefix_sum_kernel_list.push(kernel);
-        console.log(`created prefix sum kernel with dispatch param ${segment_cnt}`);
-
-
-        if (segment_cnt == 1) {
-            return kernel;
-        }
-
-        const next_kernel: Kernel = create_prefix_sum_kernels_recursively(
-            prefix_sum_shader,
-            prefix_sum_kernel_list,
-            cum_kernel_list,
-            dispatch_params
-        );
-
-        const prefix_sum_cum_kernel_builder = new KernelBuilder(g_device, "prefix_sum_cum_kernel", prefix_sum_cum_shader, "compute");
-        const cum_kernel: Kernel = prefix_sum_cum_kernel_builder
-            .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
-            .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, kernel.get_buffer("array_length"))
-            .add_buffer("prefix_sum", 1, BufferTypeEnum.STORAGE, kernel.get_buffer("prefix_sum"))
-            .add_buffer("segment_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, next_kernel.get_buffer("prefix_sum"))
-            .build();
-        cum_kernel_list.push(cum_kernel);
-
-        console.log(`created prefix sum CUM kernel with array length ${kernel.get_buffer("prefix_sum").size / 4}`);
-
-        return cum_kernel;
-    }
-
     if (c_prefix_sum_mode == 0) { // native
         const prefix_sum_native_kernel_builder = new KernelBuilder(g_device, "prefix_sum_native", prefix_sum_native_shader, "compute");
         g_prefix_sum_native_kernel = prefix_sum_native_kernel_builder
@@ -332,11 +261,11 @@ function init_kernels_prefix_sum() {
             .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
             .build();
     } else if (c_prefix_sum_mode == 1) { // basic (segmented native scan + cum)
-        g_prefix_sum_basic_kernel = new PrefixSumKernel(g_device, prefix_sum_basic_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer);
+        g_prefix_sum_basic_kernel = new PrefixSumKernel(g_device, prefix_sum_basic_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer, c_array_length);
     } else if (c_prefix_sum_mode == 2) { // segmented h-s + cum
-        g_prefix_sum_hs_kernel = new PrefixSumKernel(g_device, prefix_sum_hs_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer);
+        g_prefix_sum_hs_kernel = new PrefixSumKernel(g_device, prefix_sum_hs_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer, c_array_length);
     } else if (c_prefix_sum_mode == 3) { // segmented blelloch + cum
-        g_prefix_sum_blelloch_kernel = new PrefixSumKernel(g_device, prefix_sum_blelloch_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer);
+        g_prefix_sum_blelloch_kernel = new PrefixSumKernel(g_device, prefix_sum_blelloch_shader, prefix_sum_cum_shader, g_array_length_buffer, g_input_array_buffer, c_array_length);
     }
 }
 
@@ -382,60 +311,90 @@ function init_kernels_sort() {
             g_sort_radix_sort_block_kernel_chain.push(kernel);
         }
     } else if (c_sort_mode == 3) { // full radix sort
-        const wg_cnt = Math.ceil(c_array_length / c_sort_kernel_segment_length);
+        const slot_size_buffer_length = g_device.createBuffer({
+            label: 'slot size length buffer',
+            size: 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        const slot_size_buffer_length_data = new Uint32Array(1);
+        slot_size_buffer_length_data[0] = c_sort_slot_size_buffer_length;
+        g_device.queue.writeBuffer(slot_size_buffer_length, 0, slot_size_buffer_length_data.buffer);
+
+        const wg_cnt_buffer = g_device.createBuffer({
+            label: 'wg cnt  buffer',
+            size: 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        const wg_cnt_buffer_data = new Uint32Array(1);
+        wg_cnt_buffer_data[0] = c_sort_wg_cnt;
+        g_device.queue.writeBuffer(wg_cnt_buffer, 0, wg_cnt_buffer_data.buffer);
 
         for (let i = 0; i < 32; i += c_radix_sort_bits) { // assume key is 32-bit
             const radix_sort_kernel_builder = new KernelBuilder(g_device, "radix_full", radix_sort_full_prefix_sum_shader, "compute");
             const radix_sort_scatter_kernel_builder = new KernelBuilder(g_device, "radix_full_scatter", radix_sort_full_scatter_shader, "compute");
-            let kernel: Kernel;
+
+            let radix_sort_kernel: Kernel;
+            let radix_sort_scatter_kernel: Kernel;
             if (i == 0) {
-                kernel = radix_sort_kernel_builder
+                radix_sort_kernel = radix_sort_kernel_builder
                     .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
                     .add_constant("RADIX_BITS", c_radix_sort_bits)
                     .add_constant("RIGHT_SHIFT_BITS", 0)
                     .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
                     .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
-                    .create_then_add_buffer("slot_size", 2, BufferTypeEnum.STORAGE, (1 << c_radix_sort_bits) * wg_cnt * 4)
+                    .create_then_add_buffer("slot_size", 2, BufferTypeEnum.STORAGE, c_sort_slot_size_buffer_length * 4)
                     .create_then_add_buffer("local_prefix_sum", 3, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .add_buffer("wg_cnt", 4, BufferTypeEnum.UNIFORM, wg_cnt_buffer)
                     .build();
             } else {
-                kernel = radix_sort_kernel_builder
+                radix_sort_kernel = radix_sort_kernel_builder
                     .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
                     .add_constant("RADIX_BITS", c_radix_sort_bits)
                     .add_constant("RIGHT_SHIFT_BITS", i)
                     .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
                     .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_scatter_kernel_chain.at(-1)?.get_buffer("sorted_array")!)
-                    .create_then_add_buffer("slot_size", 2, BufferTypeEnum.STORAGE, (1 << c_radix_sort_bits) * wg_cnt * 4)
+                    .create_then_add_buffer("slot_size", 2, BufferTypeEnum.STORAGE, c_sort_slot_size_buffer_length * 4)
                     .create_then_add_buffer("local_prefix_sum", 3, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .add_buffer("wg_cnt", 4, BufferTypeEnum.UNIFORM, wg_cnt_buffer)
                     .build();
             }
-            g_sort_radix_sort_full_kernel_chain.push(kernel);
+            g_sort_radix_sort_full_kernel_chain.push(radix_sort_kernel);
+
+            // prefix sum
+            const prefix_sum_kernel = new PrefixSumKernel(g_device, prefix_sum_blelloch_shader, prefix_sum_cum_shader,
+                slot_size_buffer_length,
+                radix_sort_kernel.get_buffer("slot_size"),
+                c_sort_slot_size_buffer_length
+            );
+            g_sort_radix_sort_full_prefix_sum_kernel_chain.push(prefix_sum_kernel);
 
             // scatter
             if (i == 0) {
-                kernel = radix_sort_scatter_kernel_builder
+                radix_sort_scatter_kernel = radix_sort_scatter_kernel_builder
                     .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
                     .add_constant("RADIX_BITS", c_radix_sort_bits)
                     .add_constant("RIGHT_SHIFT_BITS", 0)
                     .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
                     .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_input_array_buffer)
-                    .add_buffer("slot_size_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("slot_size")!)
-                    .add_buffer("local_prefix_sum", 3, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("local_prefix_sum")!)
+                    .add_buffer("slot_size_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, prefix_sum_kernel.get_output_buffer())
+                    .add_buffer("local_prefix_sum", 3, BufferTypeEnum.READONLY_STORAGE, radix_sort_kernel.get_buffer("local_prefix_sum"))
                     .create_then_add_buffer("sorted_array", 4, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .add_buffer("wg_cnt", 5, BufferTypeEnum.UNIFORM, wg_cnt_buffer)
                     .build();
             } else {
-                kernel = radix_sort_scatter_kernel_builder
+                radix_sort_scatter_kernel = radix_sort_scatter_kernel_builder
                     .add_constant("SEGMENT_LENGTH", c_sort_kernel_segment_length)
                     .add_constant("RADIX_BITS", c_radix_sort_bits)
                     .add_constant("RIGHT_SHIFT_BITS", i)
                     .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, g_array_length_buffer)
                     .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_scatter_kernel_chain.at(-1)?.get_buffer("sorted_array")!)
-                    .add_buffer("slot_size_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("slot_size")!)
-                    .add_buffer("local_prefix_sum", 3, BufferTypeEnum.READONLY_STORAGE, g_sort_radix_sort_full_kernel_chain.at(-1)?.get_buffer("local_prefix_sum")!)
+                    .add_buffer("slot_size_prefix_sum", 2, BufferTypeEnum.READONLY_STORAGE, prefix_sum_kernel.get_output_buffer())
+                    .add_buffer("local_prefix_sum", 3, BufferTypeEnum.READONLY_STORAGE, radix_sort_kernel.get_buffer("local_prefix_sum"))
                     .create_then_add_buffer("sorted_array", 4, BufferTypeEnum.STORAGE, c_array_length * 4)
+                    .add_buffer("wg_cnt", 5, BufferTypeEnum.UNIFORM, wg_cnt_buffer)
                     .build();
             }
-            g_sort_radix_sort_full_scatter_kernel_chain.push(kernel);
+            g_sort_radix_sort_full_scatter_kernel_chain.push(radix_sort_scatter_kernel);
         }
     }
 }
@@ -477,12 +436,6 @@ async function compute() {
         } else if (c_prefix_sum_mode == 2) {
             g_prefix_sum_hs_kernel.dispatch(command_encoder);
         } else if (c_prefix_sum_mode == 3) {
-            // g_prefix_sum_blelloch_kernel_list.forEach((kernel, index) => {
-            //     kernel.dispatch(g_prefix_sum_blelloch_dispatch_params[index], 1, 1, command_encoder);
-            // });
-            // g_prefix_sum_blelloch_cum_kernel_list.forEach((kernel, index) => {
-            //     kernel.dispatch(g_prefix_sum_blelloch_dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
-            // });
             g_prefix_sum_blelloch_kernel.dispatch(command_encoder);
         }
     }
@@ -491,17 +444,16 @@ async function compute() {
         if (c_sort_mode == 0) {
             g_sort_bubble_kernel.dispatch(1, 1, 1, command_encoder);
         } else if (c_sort_mode == 1) {
-            g_sort_bubble_block_kernel.dispatch(Math.ceil(c_array_length / c_sort_kernel_segment_length), 1, 1, command_encoder);
+            g_sort_bubble_block_kernel.dispatch(c_sort_wg_cnt, 1, 1, command_encoder);
         } else if (c_sort_mode == 2) {
             g_sort_radix_sort_block_kernel_chain.forEach((kernel) => {
-                kernel.dispatch(Math.ceil(c_array_length / c_sort_kernel_segment_length), 1, 1, command_encoder);
+                kernel.dispatch(c_sort_wg_cnt, 1, 1, command_encoder);
             });
         } else if (c_sort_mode == 3) {
-            const wg_cnt = Math.ceil(c_array_length / c_sort_kernel_segment_length);
-
             g_sort_radix_sort_full_kernel_chain.forEach((kernel, index) => {
-                kernel.dispatch(wg_cnt, 1, 1, command_encoder);
-                g_sort_radix_sort_full_scatter_kernel_chain[index].dispatch(wg_cnt, 1, 1, command_encoder);
+                kernel.dispatch(c_sort_wg_cnt, 1, 1, command_encoder);
+                g_sort_radix_sort_full_prefix_sum_kernel_chain[index].dispatch(command_encoder);
+                g_sort_radix_sort_full_scatter_kernel_chain[index].dispatch(c_sort_wg_cnt, 1, 1, command_encoder);
             });
         }
     }
@@ -559,6 +511,9 @@ async function inspect_output_sort() {
         await g_sort_radix_sort_block_kernel_chain.at(-1)?.print_buffer_uint32("sorted_array");
     } else if (c_sort_mode == 3) {
         console.log("radix sort full --->");
+        await g_sort_radix_sort_full_kernel_chain.at(-1)?.print_buffer_uint32("slot_size");
+        await g_sort_radix_sort_full_kernel_chain.at(-1)?.print_buffer_uint32("local_prefix_sum");
+        await g_sort_radix_sort_full_scatter_kernel_chain.at(-1)?.print_buffer_uint32("slot_size_prefix_sum");
         await g_sort_radix_sort_full_scatter_kernel_chain.at(-1)?.print_buffer_uint32("sorted_array");
     }
 }

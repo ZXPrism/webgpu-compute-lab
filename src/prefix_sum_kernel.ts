@@ -1,5 +1,5 @@
 import { BufferTypeEnum } from "./buffer_info";
-import { c_array_length, c_prefix_sum_kernel_segment_length } from "./config";
+import { c_prefix_sum_kernel_segment_length } from "./config";
 import type { Kernel } from "./kernel";
 import { KernelBuilder } from "./kernel_builder";
 
@@ -15,9 +15,14 @@ export class PrefixSumKernel {
     private _cum_kernel_list: Kernel[] = [];
     private _dispatch_params: number[] = [];
 
+    private _array_length: number;
+
     constructor(device: GPUDevice, prefix_sum_shader: string, prefix_sum_cum_shader: string,
-        array_length_buffer: GPUBuffer, input_array_buffer: GPUBuffer
+        array_length_buffer: GPUBuffer, input_array_buffer: GPUBuffer,
+        array_length: number
     ) {
+        this._array_length = array_length;
+
         this._device = device;
         this._array_length_buffer = array_length_buffer;
         this._input_array_buffer = input_array_buffer;
@@ -32,9 +37,11 @@ export class PrefixSumKernel {
         this._prefix_sum_kernel_list.forEach((kernel, index) => {
             kernel.dispatch(this._dispatch_params[index], 1, 1, command_encoder);
         });
-        this._cum_kernel_list.forEach((kernel, index) => {
-            kernel.dispatch(this._dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
-        });
+        if (this._cum_kernel_list.length != 0) {
+            this._cum_kernel_list.forEach((kernel, index) => {
+                kernel.dispatch(this._dispatch_params.at(-index - 2)!, 1, 1, command_encoder);
+            });
+        }
     }
 
     public async inspect() {
@@ -45,6 +52,13 @@ export class PrefixSumKernel {
         }
     }
 
+    public get_output_buffer(): GPUBuffer {
+        if (this._cum_kernel_list.length == 0) {
+            return this._prefix_sum_kernel_list[0].get_buffer("prefix_sum");
+        }
+        return this._cum_kernel_list.at(-1)?.get_buffer("prefix_sum")!;
+    }
+
     private _create_prefix_sum_kernels_recursively() {
         const prefix_sum_basic_kernel_builder = new KernelBuilder(this._device, "prefix_sum_kernel", this._prefix_sum_shader, "compute");
 
@@ -52,14 +66,14 @@ export class PrefixSumKernel {
         let segment_cnt: number;
 
         if (this._prefix_sum_kernel_list.length == 0) {
-            segment_cnt = Math.ceil(c_array_length / c_prefix_sum_kernel_segment_length);
+            segment_cnt = Math.ceil(this._array_length / c_prefix_sum_kernel_segment_length);
             this._dispatch_params.push(segment_cnt);
 
             kernel = prefix_sum_basic_kernel_builder
                 .add_constant("SEGMENT_LENGTH", c_prefix_sum_kernel_segment_length)
                 .add_buffer("array_length", 0, BufferTypeEnum.UNIFORM, this._array_length_buffer)
                 .add_buffer("input_array", 1, BufferTypeEnum.READONLY_STORAGE, this._input_array_buffer)
-                .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, c_array_length * 4)
+                .create_then_add_buffer("prefix_sum", 2, BufferTypeEnum.STORAGE, this._array_length * 4)
                 .create_then_add_buffer("segment_sum", 3, BufferTypeEnum.STORAGE, segment_cnt * 4)
                 .build();
         } else {

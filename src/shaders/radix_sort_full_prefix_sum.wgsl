@@ -6,6 +6,7 @@ override RIGHT_SHIFT_BITS: u32; // set by outer codes, starting from zero, each 
 @group(0) @binding(1) var<storage, read> input_array : array<u32>;
 @group(0) @binding(2) var<storage, read_write> slot_size : array<u32>; // size = (1u << RADIX_BITS) * WG_CNT
 @group(0) @binding(3) var<storage, read_write> local_prefix_sum : array<u32>; // size = array_length
+@group(0) @binding(4) var<uniform> wg_cnt : u32;
 
 var<workgroup> input_data: array<u32, SEGMENT_LENGTH>;
 var<workgroup> psum : array<u32, SEGMENT_LENGTH>;
@@ -24,8 +25,6 @@ fn compute(
     }
 
     workgroupBarrier();
-
-    let wg_cnt: u32 = u32(ceil(f32(array_length) / f32(SEGMENT_LENGTH)));
 
     let psum_way_cnt = 1u << RADIX_BITS;
     let mask = psum_way_cnt - 1u;

@@ -11,7 +11,7 @@ fn compute(
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) segment_id : vec3<u32>
 ) {
-    if(segment_id.x > 0 && global_id.x < array_length) {
-        prefix_sum[global_id.x] += segment_prefix_sum[segment_id.x - 1];
+    if global_id.x < array_length {
+        prefix_sum[global_id.x] += segment_prefix_sum[segment_id.x];
     }
 }

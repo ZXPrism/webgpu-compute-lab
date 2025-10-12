@@ -7,6 +7,7 @@ override RIGHT_SHIFT_BITS: u32; // set by outer codes, starting from zero, each 
 @group(0) @binding(2) var<storage, read> slot_size_prefix_sum : array<u32>; // size = (1u << RADIX_BITS) * WG_CNT
 @group(0) @binding(3) var<storage, read> local_prefix_sum : array<u32>; // size = array_length
 @group(0) @binding(4) var<storage, read_write> sorted_array : array<u32>;
+@group(0) @binding(5) var<uniform> wg_cnt : u32;
 
 @compute
 @workgroup_size(SEGMENT_LENGTH, 1, 1)
@@ -19,8 +20,7 @@ fn compute(
         return;
     }
 
-    let wg_cnt: u32 = u32(ceil(f32(array_length) / f32(SEGMENT_LENGTH)));
-    let value = input_array[local_id.x];
+    let value = input_array[global_id.x];
     let local_prefix = local_prefix_sum[global_id.x];
     let mask = (1u << RADIX_BITS) - 1u;
     let curr_slot = (value >> RIGHT_SHIFT_BITS) & mask;
