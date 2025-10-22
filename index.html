@@ -1,16 +1,223 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>webgpu-compute-lab</title>
+  <title>WebGPU Compute Shader Test</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #1a1a1a;
+      color: white;
+      font-family: Arial;
+    }
+
+    canvas {
+      border: 1px solid #444;
+      margin: 10px 0;
+    }
+
+    button {
+      padding: 10px 20px;
+      background: #0066cc;
+      color: white;
+      border: none;
+      cursor: pointer;
+      margin: 5px;
+    }
+
+    button:hover {
+      background: #0055aa;
+    }
+
+    #status {
+      margin: 10px 0;
+      font-family: monospace;
+    }
+  </style>
 </head>
 
 <body>
-  <div id="app"></div>
-  <script type="module" src="/src/main.ts"></script>
-  <canvas></canvas>
+  <h1>WebGPU Compute Shader Test</h1>
+  <button onclick="runTest()">Run Compute Shader</button>
+  <button onclick="readBackResults()">Read Back Results</button>
+  <div id="status">Initializing WebGPU...</div>
+  <canvas id="canvas" width="512" height="512"></canvas>
+
+  <script>
+    let device;
+    let canvas;
+    let context;
+    let outputBuffer;
+    let stagingBuffer;
+
+    const computeShaderCode = `
+@group(0) @binding(0) var<storage, read_write> output : array<u32, 64>;
+
+var<workgroup> local_histogram : array<atomic<u32>, 2>;
+
+@compute
+@workgroup_size(64, 1, 1)
+fn compute(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+) {
+    if local_id.x <= 2 {
+        atomicStore(&local_histogram[local_id.x], 0u);
+    }
+    workgroupBarrier();
+
+    let local_offset = atomicAdd(&local_histogram[local_id.x & 1u], 1u);
+    workgroupBarrier();
+
+    output[global_id.x] = local_offset;
+}
+`;
+
+    async function initWebGPU() {
+      if (!navigator.gpu) {
+        throw new Error("WebGPU not supported");
+      }
+
+      const adapter = await navigator.gpu.requestAdapter();
+      device = await adapter.requestDevice();
+
+      canvas = document.getElementById('canvas');
+      context = canvas.getContext('webgpu');
+
+      const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+      context.configure({
+        device: device,
+        format: canvasFormat,
+        alphaMode: 'premultiplied'
+      });
+
+      document.getElementById('status').textContent = 'WebGPU initialized!';
+    }
+
+    async function runTest() {
+      if (!device) {
+        await initWebGPU();
+      }
+
+      try {
+        // Create output buffer (64 u32 elements = 256 bytes)
+        const bufferSize = 64 * 4; // 64 u32 * 4 bytes each
+
+        if (outputBuffer) outputBuffer.destroy();
+        if (stagingBuffer) stagingBuffer.destroy();
+
+        outputBuffer = device.createBuffer({
+          size: bufferSize,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        // Create staging buffer for potential readback
+        stagingBuffer = device.createBuffer({
+          size: bufferSize,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        // Create compute pipeline
+        const computeShaderModule = device.createShaderModule({
+          code: computeShaderCode
+        });
+
+        const computePipeline = device.createComputePipeline({
+          layout: 'auto',
+          compute: {
+            module: computeShaderModule,
+            entryPoint: 'compute'
+          }
+        });
+
+        // Create bind group
+        const bindGroup = device.createBindGroup({
+          layout: computePipeline.getBindGroupLayout(0),
+          entries: [
+            {
+              binding: 0,
+              resource: {
+                buffer: outputBuffer
+              }
+            }
+          ]
+        });
+
+        // Create command encoder
+        const commandEncoder = device.createCommandEncoder();
+
+        // === COMPUTE PASS ===
+        const computePass = commandEncoder.beginComputePass();
+        computePass.setPipeline(computePipeline);
+        computePass.setBindGroup(0, bindGroup);
+        computePass.dispatchWorkgroups(1); // 1 workgroup of size (64, 1, 1)
+        computePass.end();
+
+        // === RENDER PASS (for profiler) ===
+        const renderPass = commandEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: context.getCurrentTexture().createView(),
+              loadOp: 'load',  // Do nothing - just load existing content
+              storeOp: 'store',
+            },
+          ],
+        });
+        renderPass.end();
+
+        // Submit commands
+        device.queue.submit([commandEncoder.finish()]);
+
+        document.getElementById('status').textContent = 'Compute shader executed! Check profiler.';
+
+      } catch (error) {
+        document.getElementById('status').textContent = `Error: ${error.message}`;
+        console.error(error);
+      }
+    }
+
+    async function readBackResults() {
+      if (!outputBuffer) {
+        document.getElementById('status').textContent = 'Run compute shader first!';
+        return;
+      }
+
+      try {
+        const bufferSize = 64 * 4;
+        const commandEncoder = device.createCommandEncoder();
+
+        // Copy output buffer to staging buffer
+        commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, bufferSize);
+        device.queue.submit([commandEncoder.finish()]);
+
+        // Read back results
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+        const resultArray = new Uint32Array(stagingBuffer.getMappedRange());
+
+        // Display results
+        let resultString = 'Output buffer contents: ';
+        for (let i = 0; i < Math.min(16, resultArray.length); i++) {
+          resultString += resultArray[i] + ' ';
+        }
+        if (resultArray.length > 16) {
+          resultString += '...';
+        }
+
+        document.getElementById('status').textContent = resultString;
+        console.log('Full results:', Array.from(resultArray));
+
+        stagingBuffer.unmap();
+
+      } catch (error) {
+        document.getElementById('status').textContent = `Readback error: ${error.message}`;
+        console.error(error);
+      }
+    }
+
+    // Initialize on load
+    initWebGPU().catch(console.error);
+  </script>
 </body>
 
 </html>
